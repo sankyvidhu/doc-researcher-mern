@@ -17,7 +17,7 @@ class LocalFallbackStore {
       settings: {
         localFolderPath: '',
         selectedModel: 'llama3.2',
-        ollamaEndpoint: 'http://localhost:11434',
+        ollamaEndpoint: process.env.OLLAMA_HOST || 'http://localhost:11434',
         topK: 5,
         temperature: 0.2
       }

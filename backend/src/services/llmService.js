@@ -50,7 +50,7 @@ export async function getLocalModels(endpoint = DEFAULT_OLLAMA_HOST) {
       { name: 'qwen2.5:latest', size: '4.5 GB', details: { family: 'qwen' } }
     ],
     defaultModel: 'llama3.2',
-    notice: 'Local Ollama service was not detected at http://localhost:11434. The app will use Local RAG Synthesis engine until Ollama is started.'
+    notice: `Local Ollama service was not detected at ${endpoint}. The app will use Local RAG Synthesis engine until Ollama is started.`
   };
 }
 
@@ -80,6 +80,8 @@ export async function streamLLMResponse({
   }
 
   if (isOllamaReachable) {
+    let fullContent = '';
+    let streamed = false;
     try {
       const response = await fetch(`${endpoint}/api/chat`, {
         method: 'POST',
@@ -103,35 +105,48 @@ export async function streamLLMResponse({
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
-      let fullContent = '';
+      let buffer = '';
+
+      const handleLine = (line) => {
+        if (!line.trim()) return;
+        try {
+          const parsed = JSON.parse(line);
+          const token = parsed.message?.content || parsed.response || '';
+          if (token) {
+            fullContent += token;
+            streamed = true;
+            onToken(token);
+          }
+        } catch {
+          // Malformed NDJSON line
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const rawChunk = decoder.decode(value, { stream: true });
-        const lines = rawChunk.split('\n').filter(Boolean);
-
-        for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line);
-            const token = parsed.message?.content || parsed.response || '';
-            if (token) {
-              fullContent += token;
-              onToken(token);
-            }
-          } catch {
-            // Partial JSON chunk line
-          }
-        }
+        // NDJSON lines can be split across network chunks; keep the trailing partial line
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        lines.forEach(handleLine);
       }
-
-      if (onComplete) onComplete(fullContent);
-      return;
+      handleLine(buffer + decoder.decode());
     } catch (err) {
-      console.warn('[LLMService] Ollama stream failed, falling back to local synthesizer:', err.message);
-      // Fall through to local RAG synthesis
+      if (!streamed) {
+        console.warn('[LLMService] Ollama stream failed, falling back to local synthesizer:', err.message);
+      } else {
+        console.warn('[LLMService] Ollama stream interrupted:', err.message);
+      }
     }
+
+    // Once tokens have reached the client, finish with what we have instead of appending a fallback answer
+    if (streamed) {
+      if (onComplete) await onComplete(fullContent);
+      return;
+    }
+    // Otherwise fall through to local RAG synthesis
   }
 
   // --- High Quality Local RAG Synthesis Engine (Fallback / Offline) ---
@@ -154,7 +169,7 @@ async function runLocalRAGSynthesis({ prompt, retrievedChunks, model, onToken, o
       onToken(char);
       await new Promise(r => setTimeout(r, 10));
     }
-    if (onComplete) onComplete(msg);
+    if (onComplete) await onComplete(msg);
     return;
   }
 
@@ -197,5 +212,5 @@ async function runLocalRAGSynthesis({ prompt, retrievedChunks, model, onToken, o
     await new Promise(r => setTimeout(r, 12));
   }
 
-  if (onComplete) onComplete(accumulated);
+  if (onComplete) await onComplete(accumulated);
 }

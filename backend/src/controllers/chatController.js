@@ -81,7 +81,7 @@ export async function streamChat(req, res) {
     sessionId,
     message,
     model = 'llama3.2',
-    endpoint = 'http://localhost:11434',
+    endpoint = process.env.OLLAMA_HOST || 'http://localhost:11434',
     topK = 5,
     temperature = 0.2,
     documentIds = null
@@ -99,7 +99,12 @@ export async function streamChat(req, res) {
     'X-Accel-Buffering': 'no', // Disable proxy buffering
   });
 
+  // Stop writing once the client disconnects (e.g. user pressed Stop)
+  let clientClosed = false;
+  res.on('close', () => { clientClosed = true; });
+
   const sendEvent = (event, data) => {
+    if (clientClosed || res.writableEnded) return;
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
@@ -186,13 +191,13 @@ export async function streamChat(req, res) {
           sources: retrievedChunks,
           model
         });
-        res.end();
       }
     });
 
   } catch (err) {
     console.error('[ChatController] Stream chat error:', err);
     sendEvent('error', { error: err.message });
-    res.end();
+  } finally {
+    if (!res.writableEnded) res.end();
   }
 }
