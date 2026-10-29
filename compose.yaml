@@ -1,0 +1,83 @@
+services:
+  # =========================================================================
+  # Tier 2: Database Tier (MongoDB)
+  # =========================================================================
+  mongodb:
+    image: mongo:7.0
+    container_name: doc-researcher-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - doc-researcher-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # =========================================================================
+  # Tier 3: LLM Tier (Ollama)
+  # =========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: doc-researcher-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - doc-researcher-net
+    # Optional GPU Passthrough for NVIDIA GPU users:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # =========================================================================
+  # Tier 1: Backend API Tier (Node.js Express)
+  # =========================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: doc-researcher-backend
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    environment:
+      - PORT=5001
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://mongodb:27017/doc_researcher
+      - OLLAMA_HOST=http://ollama:11434
+    volumes:
+      - backend_uploads:/app/uploads
+      - ./sample_documents:/sample_documents:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    networks:
+      - doc-researcher-net
+
+volumes:
+  mongo_data:
+    name: doc_researcher_mongo_data
+  ollama_models:
+    name: doc_researcher_ollama_models
+  backend_uploads:
+    name: doc_researcher_uploads
+
+networks:
+  doc-researcher-net:
+    name: doc_researcher_network
+    driver: bridge
+

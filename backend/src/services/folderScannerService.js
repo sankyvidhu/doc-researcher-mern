@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import chokidar from 'chokidar';
+import mongoose from 'mongoose';
 import { extractDocumentContent } from './extractorService.js';
 import { chunkDocumentPages } from './chunkingService.js';
 import { computeLocalEmbedding } from './embeddingService.js';
@@ -71,19 +72,14 @@ export async function indexSingleFile(filePath, { source = 'local_folder', force
   const dbStatus = getDbStatus();
 
   // Check if already indexed and unmodified
-  let existingDoc = null;
-  if (dbStatus.isMongoConnected) {
-    existingDoc = await DocumentModel.findOne({ filePath });
-  } else {
-    const docs = await fallbackStore.getDocuments();
-    existingDoc = docs.find(d => d.filePath === filePath);
-  }
+  const existingDoc = await findDocumentByPath(filePath);
 
   if (existingDoc && !force) {
     const lastModified = existingDoc.metadata?.lastModified 
       ? new Date(existingDoc.metadata.lastModified).getTime() 
       : 0;
-    if (stats.mtimeMs <= lastModified && existingDoc.status === 'indexed') {
+    // Stored dates have millisecond precision; mtimeMs can carry a fractional part
+    if (Math.floor(stats.mtimeMs) <= lastModified && existingDoc.status === 'indexed') {
       return null; // Skip unchanged file
     }
   }
@@ -99,7 +95,15 @@ export async function indexSingleFile(filePath, { source = 'local_folder', force
     chunkOverlap: 120
   });
 
-  const docId = existingDoc ? (existingDoc._id || existingDoc.id) : ('doc_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7));
+  // MongoDB requires ObjectId _ids; the fallback store uses prefixed string ids
+  let docId;
+  if (existingDoc) {
+    docId = existingDoc._id || existingDoc.id;
+  } else if (dbStatus.isMongoConnected) {
+    docId = new mongoose.Types.ObjectId();
+  } else {
+    docId = 'doc_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+  }
 
   // 3. Compute vector embeddings for each chunk
   const preparedChunks = rawChunks.map(chunk => ({
@@ -131,7 +135,8 @@ export async function indexSingleFile(filePath, { source = 'local_folder', force
 
   // 4. Save document & chunks in MongoDB or Fallback Store
   if (dbStatus.isMongoConnected) {
-    await DocumentModel.findOneAndUpdate({ filePath }, docData, { upsert: true, new: true });
+    const { _id, ...docFields } = docData;
+    await DocumentModel.findOneAndUpdate({ _id }, docFields, { upsert: true, new: true });
     await ChunkModel.deleteMany({ documentId: String(docId) });
     if (preparedChunks.length > 0) {
       await ChunkModel.insertMany(preparedChunks);
@@ -147,6 +152,27 @@ export async function indexSingleFile(filePath, { source = 'local_folder', force
 }
 
 /**
+ * Find an indexed document by its absolute file path
+ */
+export async function findDocumentByPath(filePath) {
+  if (getDbStatus().isMongoConnected) {
+    return await DocumentModel.findOne({ filePath }).lean();
+  }
+  const docs = await fallbackStore.getDocuments();
+  return docs.find(d => d.filePath === filePath) || null;
+}
+
+/**
+ * Find an indexed document by id
+ */
+export async function findDocumentById(docId) {
+  if (getDbStatus().isMongoConnected) {
+    return mongoose.isValidObjectId(docId) ? await DocumentModel.findById(docId).lean() : null;
+  }
+  return (await fallbackStore.getDocumentById(docId)) || null;
+}
+
+/**
  * Remove document and its chunks
  */
 export async function removeDocument(docId) {
@@ -155,7 +181,7 @@ export async function removeDocument(docId) {
     await DocumentModel.findByIdAndDelete(docId);
     await ChunkModel.deleteMany({ documentId: String(docId) });
   } else {
-    await fallbackStore.deleteDocument(docId);
+    await fallbackStore.deleteDocument(String(docId));
   }
 }
 
@@ -195,8 +221,17 @@ export function startFolderWatcher(folderPath) {
         indexSingleFile(filePath, { force: true }).catch(err => console.error('[FolderWatcher] Change error:', err.message));
       }
     })
-    .on('unlink', filePath => {
+    .on('unlink', async filePath => {
       console.log(`[FolderWatcher] File deleted: ${filePath}`);
+      try {
+        const doc = await findDocumentByPath(filePath);
+        if (doc) {
+          await removeDocument(doc._id || doc.id);
+          console.log(`[FolderWatcher] Removed "${path.basename(filePath)}" from index.`);
+        }
+      } catch (err) {
+        console.error('[FolderWatcher] Unlink error:', err.message);
+      }
     });
 
   console.log(`[FolderWatcher] Watching local folder: ${folderPath}`);

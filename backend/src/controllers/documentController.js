@@ -1,8 +1,9 @@
 import path from 'path';
+import fs from 'fs';
 import { DocumentModel } from '../models/Document.js';
 import { ChunkModel } from '../models/Chunk.js';
 import { fallbackStore, getDbStatus } from '../config/db.js';
-import { indexSingleFile, removeDocument } from '../services/folderScannerService.js';
+import { indexSingleFile, removeDocument, findDocumentById } from '../services/folderScannerService.js';
 
 export async function getDocuments(req, res) {
   try {
@@ -27,7 +28,7 @@ export async function getDocumentById(req, res) {
     let chunks = [];
 
     if (dbStatus.isMongoConnected) {
-      doc = await DocumentModel.findById(id).lean();
+      doc = await findDocumentById(id);
       chunks = await ChunkModel.find({ documentId: id }).sort({ chunkIndex: 1 }).lean();
     } else {
       doc = await fallbackStore.getDocumentById(id);
@@ -66,7 +67,18 @@ export async function uploadDocument(req, res) {
 export async function deleteDocumentHandler(req, res) {
   try {
     const { id } = req.params;
+    const doc = await findDocumentById(id);
+    if (!doc) {
+      return res.status(404).json({ success: false, error: 'Document not found' });
+    }
+
     await removeDocument(id);
+
+    // Uploaded files are owned by the app; local folder files are left untouched
+    if (doc.source === 'upload' && doc.filePath && fs.existsSync(doc.filePath)) {
+      fs.unlinkSync(doc.filePath);
+    }
+
     res.json({ success: true, message: 'Document and its indexed chunks removed' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

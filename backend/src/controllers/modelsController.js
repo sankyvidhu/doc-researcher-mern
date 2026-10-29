@@ -13,7 +13,7 @@ export async function listModels(req, res) {
 
 export async function testConnection(req, res) {
   try {
-    const { endpoint = 'http://localhost:11434' } = req.body;
+    const { endpoint = process.env.OLLAMA_HOST || 'http://localhost:11434' } = req.body;
     const info = await getLocalModels(endpoint);
     res.json({
       success: true,
